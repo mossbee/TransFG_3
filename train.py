@@ -448,7 +448,6 @@ def main():
 
     # if args.fp16 and args.smoothing_value != 0:
     #     raise NotImplementedError("label smoothing not supported for fp16 training now")
-    args.data_root = '{}/{}'.format(args.data_root, args.dataset)
     # Setup CUDA, GPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.n_gpu = torch.cuda.device_count()
