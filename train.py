@@ -48,12 +48,46 @@ def simple_accuracy(preds, labels):
 
 # Removed reduce_mean function as it's no longer needed without distributed training
 
-def save_model(args, model, scaler=None):
+def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None, scaler=None):
+    """Load checkpoint and return training state"""
+    logger.info(f"Loading checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    
+    # Load model state
+    model.load_state_dict(checkpoint['model'])
+    
+    # Load training states if available
+    global_step = checkpoint.get('global_step', 0)
+    best_acc = checkpoint.get('best_acc', 0)
+    
+    if optimizer is not None and 'optimizer' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        logger.info("Loaded optimizer state")
+    
+    if scheduler is not None and 'scheduler' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler'])
+        logger.info("Loaded scheduler state")
+    
+    if scaler is not None and 'scaler' in checkpoint:
+        scaler.load_state_dict(checkpoint['scaler'])
+        logger.info("Loaded scaler state")
+    
+    logger.info(f"Resuming from global_step: {global_step}, best_acc: {best_acc}")
+    return global_step, best_acc
+
+def save_model(args, model, optimizer=None, scheduler=None, scaler=None, global_step=0, best_acc=0):
     model_to_save = model.module if hasattr(model, 'module') else model
     model_checkpoint = os.path.join(args.output_dir, "%s_checkpoint.bin" % args.name)
     checkpoint = {
         'model': model_to_save.state_dict(),
+        'global_step': global_step,
+        'best_acc': best_acc,
+        'args': args,
     }
+    if optimizer is not None:
+        checkpoint['optimizer'] = optimizer.state_dict()
+    if scheduler is not None:
+        checkpoint['scheduler'] = scheduler.state_dict()
     if args.fp16 and scaler is not None:
         checkpoint['scaler'] = scaler.state_dict()
     torch.save(checkpoint, model_checkpoint)
@@ -271,6 +305,14 @@ def train(args, model):
     # Initialize GradScaler for mixed precision training
     scaler = GradScaler() if args.fp16 else None
 
+    # Initialize training state
+    global_step, best_acc = 0, 0
+    
+    # Resume from checkpoint if specified
+    if args.resume is not None:
+        global_step, best_acc = load_checkpoint(args.resume, model, optimizer, scheduler, scaler)
+        logger.info(f"Resumed training from step {global_step} with best_acc {best_acc}")
+
     # Removed distributed training setup
 
     # Train!
@@ -280,11 +322,11 @@ def train(args, model):
     logger.info("  Total train batch size (w. accumulation) = %d",
                 args.train_batch_size * args.gradient_accumulation_steps)
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
+    logger.info("  Starting from global step = %d", global_step)
 
     model.zero_grad()
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
     losses = AverageMeter()
-    global_step, best_acc = 0, 0
     start_time = time.time()
     while True:
         model.train()
@@ -358,7 +400,7 @@ def train(args, model):
                             logger.info("Current Classification Accuracy: %f" % accuracy)
                     
                     if best_acc < accuracy:
-                        save_model(args, model, scaler)
+                        save_model(args, model, optimizer, scheduler, scaler, global_step, accuracy)
                         best_acc = accuracy
                     
                     if is_verification:
@@ -367,14 +409,14 @@ def train(args, model):
                         logger.info("best accuracy so far: %f" % best_acc)
                     model.train()
 
-                if global_step % t_total == 0:
+                if global_step >= t_total:
                     break
         all_preds, all_label = all_preds[0], all_label[0]
         accuracy = simple_accuracy(all_preds, all_label)
         train_accuracy = accuracy
         logger.info("train accuracy so far: %f" % train_accuracy)
         losses.reset()
-        if global_step % t_total == 0:
+        if global_step >= t_total:
             break
 
     writer.close()
@@ -399,6 +441,8 @@ def main():
                         help="Where to search for pretrained ViT models.")
     parser.add_argument("--pretrained_model", type=str, default=None,
                         help="load pretrained model")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="resume training from checkpoint")
     parser.add_argument("--output_dir", default="./output", type=str,
                         help="The output directory where checkpoints will be written.")
     parser.add_argument("--img_size", default=448, type=int,
